@@ -29,11 +29,11 @@
 <canvas id="game"></canvas>
 <script>
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false });
 let W, H;
 let S = 1;
 function resizeCanvas() {
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const screenW = window.innerWidth;
   const screenH = window.innerHeight;
   const refH = screenW > screenH ? 600 : 844;
@@ -46,6 +46,7 @@ function resizeCanvas() {
   canvas.style.height = screenH + 'px';
   canvas.style.left = '0px';
   ctx.setTransform(S * dpr, 0, 0, S * dpr, 0, 0);
+  bgGradientDirty = true;
 }
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
@@ -115,21 +116,27 @@ function playTone(freq, dur, type, vol, slide) {
   osc.stop(t + dur);
 }
 
-// Filtered noise (soft whoosh, not harsh static)
+// Pre-generated noise buffer (reused by all playNoise calls)
+let noiseBuf = null;
+function getNoiseBuf() {
+  if (noiseBuf) return noiseBuf;
+  const len = audioCtx.sampleRate; // 1 second of noise — enough for any SFX
+  noiseBuf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+  const data = noiseBuf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  return noiseBuf;
+}
+
 function playNoise(dur, vol, cutoff) {
   ensureAudio();
   const t = audioCtx.currentTime;
-  const bufSize = audioCtx.sampleRate * dur;
-  const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
-  const data = buf.getChannelData(0);
-  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
   const src = audioCtx.createBufferSource();
   const gain = audioCtx.createGain();
   const filter = audioCtx.createBiquadFilter();
   filter.type = 'lowpass';
   filter.frequency.value = cutoff || 1500;
   filter.Q.value = 1;
-  src.buffer = buf;
+  src.buffer = getNoiseBuf();
   gain.gain.setValueAtTime(0, t);
   gain.gain.linearRampToValueAtTime(vol || 0.06, t + 0.01);
   gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
@@ -137,6 +144,7 @@ function playNoise(dur, vol, cutoff) {
   filter.connect(gain);
   gain.connect(getSfxDest());
   src.start(t);
+  src.stop(t + dur + 0.05);
 }
 
 // ─── BACKGROUND MUSIC (Interstellar organ — arpeggiated chord progressions) ───
@@ -288,6 +296,14 @@ function updateMusic() {
   const speedup = 1 - Math.min(Math.floor(meters / 100), 15) * 0.03;
   music.tempo = Math.max(25, Math.floor(music.baseTempo * speedup));
 
+  // Star mode: double speed, higher octave, brighter filter
+  if (starMusicOverride) {
+    music.tempo = Math.max(12, Math.floor(music.tempo * 0.5));
+    if (music.filter) music.filter.frequency.linearRampToValueAtTime(4500, audioCtx.currentTime + 0.3);
+  } else {
+    if (music.filter) music.filter.frequency.linearRampToValueAtTime(2200, audioCtx.currentTime + 0.5);
+  }
+
   music.noteTimer++;
   if (music.noteTimer >= music.tempo) {
     music.noteTimer = 0;
@@ -305,9 +321,10 @@ function updateMusic() {
     music.arpIdx = (music.arpIdx + 1) % music.arp.length;
     music.notesPlayed++;
 
-    const os = music.octaveShift || 1;
-    // Velocity: accent on first beat of each arp cycle
-    const vel = (0.028 + Math.random() * 0.010) * (isAccent ? 1.4 : 1.0);
+    const os = (music.octaveShift || 1) * (starMusicOverride ? 2 : 1);
+    // Velocity: accent on first beat, louder during star mode
+    const starBoost = starMusicOverride ? 1.6 : 1.0;
+    const vel = (0.028 + Math.random() * 0.010) * (isAccent ? 1.4 : 1.0) * starBoost;
     playOrganNote(chord[ni] * os, vel, 2.0 + Math.random() * 0.4);
 
     // Bass note on each chord change — anchors the harmony
@@ -319,6 +336,10 @@ function updateMusic() {
     // At higher altitudes, occasionally double with upper octave
     if (meters > 500 && Math.random() < 0.2) {
       playOrganNote(chord[ni] * os * 2, vel * 0.2, 1.5);
+    }
+    // Star mode: shimmer with high sparkle notes
+    if (starMusicOverride && Math.random() < 0.5) {
+      playOrganNote(chord[ni] * os * 4, vel * 0.12, 0.8 + Math.random() * 0.4);
     }
   }
 }
@@ -408,6 +429,51 @@ function sfxIgnition() {
   setTimeout(() => sfxOink(), 400);
 }
 
+function sfxStar() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [330, 440, 550, 660, 880].forEach((freq, i) => {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'square';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.06, t + i * 0.06);
+    g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.06 + 0.3);
+    o.connect(g); g.connect(sfxFilter);
+    o.start(t + i * 0.06); o.stop(t + i * 0.06 + 0.3);
+  });
+}
+
+function sfxHeart() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [440, 550, 660].forEach((freq, i) => {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.08, t + i * 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.25);
+    o.connect(g); g.connect(sfxFilter);
+    o.start(t + i * 0.08); o.stop(t + i * 0.08 + 0.25);
+  });
+}
+
+function sfxRevive() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [220, 330, 440, 550, 660, 880].forEach((freq, i) => {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'triangle';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.07, t + i * 0.07);
+    g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.07 + 0.35);
+    o.connect(g); g.connect(sfxFilter);
+    o.start(t + i * 0.07); o.stop(t + i * 0.07 + 0.35);
+  });
+}
+
 // ─── CONSTANTS ───
 const GRAVITY = 0.15;
 const BOOST_POWER = -7;
@@ -421,6 +487,40 @@ const PIG_DRAW_SCALE = 0.7;
 const ASTEROID_MIN_R = 14;
 const ASTEROID_MAX_R = 30;
 const NEAR_MISS_DIST = 12;
+const FUEL_COLLECT_DIST_SQ = (PIG_SIZE + FUEL_RADIUS) * (PIG_SIZE + FUEL_RADIUS);
+const POWERUP_COLLECT_DIST_SQ = (PIG_SIZE + 16) * (PIG_SIZE + 16);
+const MAGNET_RANGE_SQ = 90 * 90;
+
+// Hoisted color arrays for hot-path particle creation
+const FLAME_COLORS_5 = ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00', '#fff'];
+const FLAME_COLORS_4 = ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00'];
+const FLAME_COLORS_3 = ['#ff4400', '#ff6600', '#ffaa00'];
+const DEATH_COLORS = ['#ff6b6b', '#ffcc00', '#ff9933', '#fff'];
+
+// ─── PRE-RENDERED SPRITES ───
+// Fuel orb gradient sprite (avoids createRadialGradient per orb per frame)
+const fuelOrbSprite = document.createElement('canvas');
+fuelOrbSprite.width = 32; fuelOrbSprite.height = 32;
+(function() {
+  const fc = fuelOrbSprite.getContext('2d');
+  const r = 16;
+  const g = fc.createRadialGradient(r-2, r-2, 1, r, r, r);
+  g.addColorStop(0, '#aaffdd'); g.addColorStop(0.5, '#44ffaa'); g.addColorStop(1, '#22aa66');
+  fc.beginPath(); fc.arc(r, r, r, 0, Math.PI * 2);
+  fc.fillStyle = g; fc.fill();
+})();
+
+// Soul glow sprite (white radial glow, tinted via globalAlpha + fillStyle overlay)
+const soulGlowSprite = document.createElement('canvas');
+soulGlowSprite.width = 64; soulGlowSprite.height = 64;
+(function() {
+  const sc = soulGlowSprite.getContext('2d');
+  const r = 32;
+  const g = sc.createRadialGradient(r, r, 0, r, r, r);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  sc.fillStyle = g;
+  sc.beginPath(); sc.arc(r, r, r, 0, Math.PI * 2); sc.fill();
+})();
 
 // ─── STATE ───
 let state = 'menu';
@@ -450,6 +550,12 @@ let pigMoodTimer = 0;
 let comboTrails = [];   // visual lines between combo-collected fuels
 let lastFuelPos = null; // track last fuel position for trails
 let rocketFlash = 0;    // screen flash timer when rocket activates
+let starMusicOverride = false;
+let heartCollected = false;
+let heartReviving = false;
+let heartReviveTimer = 0;
+let heartFlyX = 0, heartFlyY = 0;
+let heartReviveTargetY = 0;  // world Y to bring pig back to
 
 // Intro state
 let introTimer = 0;
@@ -571,6 +677,8 @@ function createPig() {
     boostTimer: 0, alive: true,
     shield: false, shieldTimer: 0,
     magnet: false, magnetTimer: 0,
+    star: false, starTimer: 0,
+    heart: false,
     invincibleTimer: 0,
     rocketTimer: 0  // frames of free auto-propulsion remaining
   };
@@ -578,7 +686,7 @@ function createPig() {
 
 function boost() {
   if (!pig || !pig.alive || pig.fuel <= 0) return;
-  pig.fuel--;
+  if (!pig.star) pig.fuel--;
   pig.vy = BOOST_POWER;
   pig.boostTimer = 12;
   boostsSinceLastFuel++;
@@ -603,7 +711,13 @@ function spawnFuels() {
       pulse: Math.random() * Math.PI * 2
     });
   }
-  fuels = fuels.filter(f => f.y < cameraY + H + 100);
+  // Remove off-screen fuels in-place (no new array)
+  const fLimit = cameraY + H + 100;
+  let fl = fuels.length;
+  for (let i = fl - 1; i >= 0; i--) {
+    if (fuels[i].y >= fLimit) { fuels[i] = fuels[fl - 1]; fl--; }
+  }
+  fuels.length = fl;
 }
 
 function spawnAsteroids() {
@@ -625,17 +739,42 @@ function spawnAsteroids() {
         const dist = r * (0.7 + Math.random() * 0.3);
         verts.push({ x: Math.cos(angle) * dist, y: Math.sin(angle) * dist });
       }
+      // Pre-render asteroid to offscreen canvas
+      const pad = 4; // padding for stroke
+      const spriteSize = Math.ceil((r + pad) * 2);
+      const ac = document.createElement('canvas');
+      ac.width = spriteSize; ac.height = spriteSize;
+      const actx = ac.getContext('2d');
+      const cx = spriteSize / 2, cy = spriteSize / 2;
+      // Body
+      actx.beginPath();
+      actx.moveTo(cx + verts[0].x, cy + verts[0].y);
+      for (let v = 1; v < verts.length; v++) actx.lineTo(cx + verts[v].x, cy + verts[v].y);
+      actx.closePath();
+      actx.fillStyle = '#554433'; actx.fill();
+      actx.strokeStyle = '#887766'; actx.lineWidth = 2; actx.stroke();
+      // Craters
+      actx.fillStyle = '#443322';
+      actx.beginPath(); actx.arc(cx + r*0.2, cy - r*0.1, r*0.2, 0, Math.PI*2); actx.fill();
+      actx.beginPath(); actx.arc(cx - r*0.3, cy + r*0.2, r*0.15, 0, Math.PI*2); actx.fill();
+
       asteroids.push({
         x: 20 + Math.random() * (W - 40),
         y: highest + (Math.random() - 0.5) * gap * 0.3, r,
         vx: (Math.random() - 0.5) * 1.2,
         rotSpeed: (Math.random() - 0.5) * 0.025,
         rot: Math.random() * Math.PI * 2,
-        verts, nearMissed: false
+        verts, nearMissed: false,
+        sprite: ac, spriteOff: spriteSize / 2
       });
     }
   }
-  asteroids = asteroids.filter(a => a.y < cameraY + H + 150);
+  const aLimit = cameraY + H + 150;
+  let al = asteroids.length;
+  for (let i = al - 1; i >= 0; i--) {
+    if (asteroids[i].y >= aLimit) { asteroids[i] = asteroids[al - 1]; al--; }
+  }
+  asteroids.length = al;
 }
 
 function spawnPowerups() {
@@ -645,15 +784,40 @@ function spawnPowerups() {
 
   while (highest > spawnTop) {
     highest -= 800 + Math.random() * 400;
-    const types = ['superfuel', 'shield', 'magnet'];
-    const type = types[Math.floor(Math.random() * types.length)];
-    powerups.push({
+    let type;
+    if (Math.random() < 0.08) {
+      type = 'star';
+    } else {
+      const pool = ['superfuel', 'shield', 'magnet'];
+      const heartExists = powerups.some(p => p.type === 'heart');
+      if (!heartCollected && !pig.heart && !heartExists && Math.random() < 0.5) pool.push('heart');
+      type = pool[Math.floor(Math.random() * pool.length)];
+    }
+    const pw = {
       x: 25 + Math.random() * (W - 50),
       y: highest, type,
       pulse: Math.random() * Math.PI * 2
-    });
+    };
+    if (type === 'star') {
+      const goRight = Math.random() < 0.5;
+      pw.x = goRight ? -15 : W + 15;
+      pw.vx = (goRight ? 1 : -1) * (2.5 + Math.random() * 1.0);
+      pw.rot = 0;
+      pw.starActive = false;
+    }
+    if (type === 'heart') {
+      pw.vy = -(2.0 + Math.random() * 0.8);
+      pw.heartActive = false;
+      pw.heartLife = 60 * 6;  // 6 seconds
+    }
+    powerups.push(pw);
   }
-  powerups = powerups.filter(p => p.y < cameraY + H + 100);
+  const pLimit = cameraY + H + 100;
+  let pl = powerups.length;
+  for (let i = pl - 1; i >= 0; i--) {
+    if (powerups[i].y >= pLimit) { powerups[i] = powerups[pl - 1]; pl--; }
+  }
+  powerups.length = pl;
 }
 
 // ─── PARTICLES & EFFECTS ───
@@ -723,6 +887,8 @@ function startIntro() {
   gameOverTimer = 0; shakeTimer = 0;
   combo = 0; boostsSinceLastFuel = 0;
   pigMood = 'normal'; pigMoodTimer = 0;
+  starMusicOverride = false;
+  heartCollected = false; heartReviving = false; heartReviveTimer = 0;
   initStars();
 }
 
@@ -746,7 +912,7 @@ function updateIntro() {
         vx: (Math.random() - 0.5) * 3, vy: Math.random() * 6 + 3,
         life: 1, decay: 0.015 + Math.random() * 0.02,
         size: 5 + Math.random() * 8,
-        color: ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00', '#fff'][Math.floor(Math.random() * 5)]
+        color: FLAME_COLORS_5[Math.floor(Math.random() * 5)]
       });
     }
     // Smoke ring
@@ -775,7 +941,7 @@ function updateIntro() {
       y: pig.y + PIG_SIZE + 4,
       vx: (Math.random() - 0.5) * 1.5, vy: Math.random() * 3 + 2,
       life: 1, decay: 0.04 + Math.random() * 0.02, size: 3 + Math.random() * 4,
-      color: ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00'][Math.floor(Math.random() * 4)]
+      color: FLAME_COLORS_4[Math.floor(Math.random() * 4)]
     });
     // Right nozzle flame
     particles.push({
@@ -783,7 +949,7 @@ function updateIntro() {
       y: pig.y + PIG_SIZE + 4,
       vx: (Math.random() - 0.5) * 1.5, vy: Math.random() * 3 + 2,
       life: 1, decay: 0.04 + Math.random() * 0.02, size: 3 + Math.random() * 4,
-      color: ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00'][Math.floor(Math.random() * 4)]
+      color: FLAME_COLORS_4[Math.floor(Math.random() * 4)]
     });
     // Occasional smoke
     if (introTimer % 4 === 0) {
@@ -819,6 +985,8 @@ function startGame() {
   gameOverTimer = 0; shakeTimer = 0;
   combo = 0; boostsSinceLastFuel = 0;
   pigMood = 'normal'; pigMoodTimer = 0;
+  starMusicOverride = false;
+  heartCollected = false; heartReviving = false; heartReviveTimer = 0;
   initStars();
   spawnFuels();
 }
@@ -826,6 +994,7 @@ function startGame() {
 function die() {
   if (state !== 'playing') return;
   if (pig.invincibleTimer > 0) return;
+  if (pig.star) return;
 
   if (pig.shield) {
     pig.shield = false;
@@ -838,6 +1007,23 @@ function die() {
     return;
   }
 
+  if (pig.heart) {
+    pig.heart = false;
+    pig.fuel = Math.max(pig.fuel, 5);
+    // Teleport pig back to visible area and freeze during animation
+    heartReviveTargetY = cameraY + H * 0.4;
+    pig.y = heartReviveTargetY;
+    pig.vy = 0;
+    pig.vx = 0;
+    pig.x = W / 2;
+    pig.invincibleTimer = 120;  // 2s invulnerable post-revive
+    heartReviving = true;
+    heartReviveTimer = 90;  // 1.5s animation
+    sfxRevive();
+    shakeTimer = 8; shakeIntensity = 6;
+    return;
+  }
+
   state = 'gameover';
   gameOverTimer = 60;
   pig.alive = false;
@@ -845,7 +1031,7 @@ function die() {
   PokiSDK.gameplayStop();
   // Vibrate on death (mobile)
   if (navigator.vibrate) navigator.vibrate([100, 50, 200, 50, 100]);
-  addExplosion(pig.x, pig.y, ['#ff6b6b', '#ffcc00', '#ff9933', '#fff'], 30);
+  addExplosion(pig.x, pig.y, DEATH_COLORS, 30);
   shakeTimer = 15; shakeIntensity = 10;
   const totalScore = meters + bonusPoints;
   if (totalScore > highScore) {
@@ -869,7 +1055,8 @@ function update() {
   difficulty = Math.min(1, frameCount / (60 * 90));
   scrollSpeed = BASE_SCROLL + difficulty * 1.4;
 
-  pig.vy += GRAVITY;
+  if (heartReviving) { pig.vy = 0; pig.vx = 0; } // freeze pig during revive
+  else pig.vy += GRAVITY;
   // Rocket auto-propulsion: softens gravity, no fuel cost
   if (pig.rocketTimer > 0) {
     pig.rocketTimer--;
@@ -883,11 +1070,25 @@ function update() {
         y: pig.y + PIG_SIZE,
         vx: (Math.random() - 0.5) * 1.5, vy: Math.random() * 2 + 1,
         life: 0.8, decay: 0.04, size: 2 + Math.random() * 3,
-        color: ['#ff4400', '#ff6600', '#ffaa00'][Math.floor(Math.random() * 3)]
+        color: FLAME_COLORS_3[Math.floor(Math.random() * 3)]
       });
     }
   }
   if (rocketFlash > 0) rocketFlash--;
+  // Star auto-propulsion: constant upward thrust + rainbow particles
+  if (pig.star) {
+    pig.vy = Math.min(pig.vy, BOOST_POWER * 0.7);
+    if (frameCount % 2 === 0) {
+      const starColors = ['#ffee44', '#ff6644', '#44ffaa', '#66ccff', '#ff66ff'];
+      particles.push({
+        x: pig.x + (Math.random() - 0.5) * 16,
+        y: pig.y + PIG_SIZE,
+        vx: (Math.random() - 0.5) * 3, vy: Math.random() * 3 + 1,
+        life: 1, decay: 0.03, size: 3 + Math.random() * 4,
+        color: starColors[Math.floor(Math.random() * starColors.length)]
+      });
+    }
+  }
   if (pig.vy > MAX_FALL) pig.vy = MAX_FALL;
   // Keyboard
   let keyTilt = 0;
@@ -929,7 +1130,31 @@ function update() {
 
   if (pig.shieldTimer > 0) { pig.shieldTimer--; if (pig.shieldTimer <= 0) pig.shield = false; }
   if (pig.magnetTimer > 0) { pig.magnetTimer--; if (pig.magnetTimer <= 0) pig.magnet = false; }
+  if (pig.starTimer > 0) { pig.starTimer--; if (pig.starTimer <= 0) { pig.star = false; starMusicOverride = false; } }
   if (pig.invincibleTimer > 0) pig.invincibleTimer--;
+
+  if (heartReviving) {
+    heartReviveTimer--;
+    // Freeze pig in place during animation
+    pig.vy = 0;
+    pig.vx = 0;
+    // Add parachute particles
+    if (frameCount % 4 === 0) {
+      particles.push({
+        x: pig.x + (Math.random() - 0.5) * 20,
+        y: pig.y - 10,
+        vx: (Math.random() - 0.5) * 1.5,
+        vy: Math.random() * 1 + 0.5,
+        life: 1, decay: 0.04, size: 2 + Math.random() * 2,
+        color: Math.random() < 0.5 ? '#ff4466' : '#ff88aa'
+      });
+    }
+    if (heartReviveTimer <= 0) {
+      heartReviving = false;
+      addText(pig.x, pig.y - 30, '♥ SAVED!', '#ff4466');
+      addExplosion(pig.x, pig.y, ['#ff4466', '#ff88aa', '#ffffff'], 15);
+    }
+  }
 
   if (pigMoodTimer > 0) { pigMoodTimer--; if (pigMoodTimer <= 0) pigMood = 'normal'; }
 
@@ -948,10 +1173,20 @@ function update() {
   if (pig.magnet) {
     for (const f of fuels) {
       const dx = pig.x - f.x, dy = pig.y - f.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 90) {
+      const distSq = dx * dx + dy * dy;
+      if (distSq < MAGNET_RANGE_SQ) {
+        const dist = Math.sqrt(distSq);
         f.x += dx / dist * 1.8;
         f.y += dy / dist * 1.8;
+      }
+    }
+    for (const a of asteroids) {
+      const dx = pig.x - a.x, dy = pig.y - a.y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < MAGNET_RANGE_SQ) {
+        const dist = Math.sqrt(distSq);
+        a.x += dx / dist * 1.2;
+        a.y += dy / dist * 1.2;
       }
     }
   }
@@ -959,7 +1194,7 @@ function update() {
   for (let i = fuels.length - 1; i >= 0; i--) {
     const f = fuels[i];
     const dx = pig.x - f.x, dy = pig.y - f.y;
-    if (dx * dx + dy * dy < (PIG_SIZE + FUEL_RADIUS) * (PIG_SIZE + FUEL_RADIUS)) {
+    if (dx * dx + dy * dy < FUEL_COLLECT_DIST_SQ) {
       pig.fuel++;
       // Combo: 1 boost (or 0) per fuel = chain continues
       if (boostsSinceLastFuel <= 1) {
@@ -987,7 +1222,7 @@ function update() {
           sfxWinner();
           addText(f.x, f.y - 50, '+4 FUEL', '#ffd700', true);
           for (let j = 0; j < 4; j++) addSoul(f.x, f.y, '#ffd700', j * 4);
-          addExplosion(pig.x, pig.y, ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00', '#fff'], 20);
+          addExplosion(pig.x, pig.y, FLAME_COLORS_5, 20);
           shakeTimer = 8; shakeIntensity = 5;
           combo = 0;
           lastFuelPos = null;
@@ -1005,10 +1240,52 @@ function update() {
     }
   }
 
+  // Move star powerups — only when on screen, fly across and vanish
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    if (p.type === 'star') {
+      const sy = p.y - cameraY;
+      if (sy > -30 && sy < H + 30) {
+        p.starActive = true;
+      }
+      if (p.starActive) {
+        p.x += p.vx;
+        p.rot += 0.04;
+        if (p.x < -30 || p.x > W + 30) { powerups.splice(i, 1); }
+      }
+    }
+  }
+
+  // Move heart powerups — fly upward, blink before vanishing
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    if (p.type === 'heart') {
+      const sy = p.y - cameraY;
+      if (sy > -30 && sy < H + 30) p.heartActive = true;
+      if (p.heartActive) {
+        p.y += p.vy;
+        p.heartLife--;
+        if (frameCount % 3 === 0) {
+          particles.push({
+            x: p.x + (Math.random() - 0.5) * 6,
+            y: p.y + 8,
+            vx: (Math.random() - 0.5) * 0.5,
+            vy: Math.random() * 1.5,
+            life: 20 + Math.random() * 10,
+            maxLife: 30,
+            color: Math.random() < 0.5 ? '#ff4466' : '#ff88aa',
+            size: 2 + Math.random() * 2
+          });
+        }
+        if (p.heartLife <= 0) { powerups.splice(i, 1); }
+      }
+    }
+  }
+
   for (let i = powerups.length - 1; i >= 0; i--) {
     const p = powerups[i];
     const dx = pig.x - p.x, dy = pig.y - p.y;
-    if (dx * dx + dy * dy < (PIG_SIZE + 16) * (PIG_SIZE + 16)) {
+    if (dx * dx + dy * dy < POWERUP_COLLECT_DIST_SQ) {
       // Superfuel counts as fuel for combo purposes
       if (p.type === 'superfuel') {
         if (boostsSinceLastFuel <= 1) {
@@ -1034,7 +1311,7 @@ function update() {
             sfxWinner();
             addText(p.x, p.y - 60, '+4 FUEL', '#ffd700', true);
             for (let j = 0; j < 4; j++) addSoul(p.x, p.y, '#ffd700', j * 4);
-            addExplosion(pig.x, pig.y, ['#ff4400', '#ff6600', '#ffaa00', '#ffdd00', '#fff'], 20);
+            addExplosion(pig.x, pig.y, FLAME_COLORS_5, 20);
             shakeTimer = 8; shakeIntensity = 5;
             combo = 0;
             lastFuelPos = null;
@@ -1059,23 +1336,44 @@ function update() {
     if (a.x > W + a.r * 2) a.x = -a.r * 2;
 
     const dx = pig.x - a.x, dy = pig.y - a.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
+    const distSq = dx * dx + dy * dy;
     const collisionDist = PIG_SIZE + a.r - 4;
-    const nearMissDist = collisionDist + NEAR_MISS_DIST;
     const panicDist = collisionDist + 40;
+    const panicDistSq = panicDist * panicDist;
 
-    if (dist < collisionDist) {
-      die();
-    } else if (dist < nearMissDist && !a.nearMissed) {
-      a.nearMissed = true;
-      const bonus = 5 + Math.floor(difficulty * 10);
-      bonusPoints += bonus;
-      sfxNearMiss();
-      addText(pig.x, pig.y - 30, `CLOSE! +${bonus}`, '#ff9944');
-      shakeTimer = 2; shakeIntensity = 2;
+    if (distSq < panicDistSq) {
+      nearAsteroid = true;
+      const collisionDistSq = collisionDist * collisionDist;
+      if (distSq < collisionDistSq) {
+        if (pig.star) {
+          a.smashed = true;
+          addExplosion(a.x, a.y, ['#ffee44', '#ff6644', '#ffaa00', '#fff'], 12);
+          addText(a.x, a.y - 20, 'SMASH!', '#ffee44');
+          shakeTimer = 3; shakeIntensity = 3;
+          sfxShieldBreak();
+          bonusPoints += 5;
+        } else {
+          die();
+        }
+      } else {
+        const nearMissDist = collisionDist + NEAR_MISS_DIST;
+        if (distSq < nearMissDist * nearMissDist && !a.nearMissed) {
+          a.nearMissed = true;
+          const bonus = 5 + Math.floor(difficulty * 10);
+          bonusPoints += bonus;
+          sfxNearMiss();
+          addText(pig.x, pig.y - 30, `CLOSE! +${bonus}`, '#ff9944');
+          shakeTimer = 2; shakeIntensity = 2;
+        }
+      }
     }
-    if (dist < panicDist) nearAsteroid = true;
   }
+
+  let al = asteroids.length;
+  for (let i = al - 1; i >= 0; i--) {
+    if (asteroids[i].smashed) { asteroids[i] = asteroids[al - 1]; al--; }
+  }
+  asteroids.length = al;
 
   if (nearAsteroid && pigMood !== 'happy') {
     pigMood = 'panic'; pigMoodTimer = 10;
@@ -1112,6 +1410,21 @@ function activatePowerup(p) {
     addCollectParticles(p.x, p.y, '#ff66ff');
     addText(p.x, p.y - 20, 'MAGNET', '#ff66ff');
     shakeTimer = 3; shakeIntensity = 2;
+  } else if (p.type === 'star') {
+    pig.star = true;
+    pig.starTimer = 60 * 5;
+    sfxStar();
+    addCollectParticles(p.x, p.y, '#ffee44');
+    addText(p.x, p.y - 20, 'STAR!', '#ffee44');
+    shakeTimer = 5; shakeIntensity = 5;
+    starMusicOverride = true;
+  } else if (p.type === 'heart') {
+    pig.heart = true;
+    heartCollected = true;
+    sfxHeart();
+    addCollectParticles(p.x, p.y, '#ff4466');
+    addText(p.x, p.y - 20, '♥ HEART!', '#ff4466');
+    shakeTimer = 3; shakeIntensity = 2;
   }
 }
 
@@ -1132,32 +1445,52 @@ function checkMilestones() {
   }
 }
 
+const MAX_PARTICLES = 150;
 function updateParticles() {
-  for (let i = particles.length - 1; i >= 0; i--) {
+  let len = particles.length;
+  for (let i = len - 1; i >= 0; i--) {
     const p = particles[i];
     p.x += p.vx; p.y += p.vy;
     p.life -= p.decay;
-    if (p.life <= 0) particles.splice(i, 1);
+    if (p.life <= 0) {
+      particles[i] = particles[len - 1];
+      len--;
+    }
+  }
+  particles.length = len;
+  if (particles.length > MAX_PARTICLES) {
+    particles.splice(0, particles.length - MAX_PARTICLES);
   }
 }
 
 function updateTexts() {
-  for (let i = texts.length - 1; i >= 0; i--) {
+  let len = texts.length;
+  for (let i = len - 1; i >= 0; i--) {
     texts[i].y -= 0.5;
     texts[i].life -= texts[i].decay;
-    if (texts[i].life <= 0) texts.splice(i, 1);
+    if (texts[i].life <= 0) {
+      texts[i] = texts[len - 1];
+      len--;
+    }
   }
+  texts.length = len;
 }
 
 function updateComboTrails() {
-  for (let i = comboTrails.length - 1; i >= 0; i--) {
+  let len = comboTrails.length;
+  for (let i = len - 1; i >= 0; i--) {
     comboTrails[i].life -= 0.012;
-    if (comboTrails[i].life <= 0) comboTrails.splice(i, 1);
+    if (comboTrails[i].life <= 0) {
+      comboTrails[i] = comboTrails[len - 1];
+      len--;
+    }
   }
+  comboTrails.length = len;
 }
 
 function updateSouls() {
-  for (let i = souls.length - 1; i >= 0; i--) {
+  let len = souls.length;
+  for (let i = len - 1; i >= 0; i--) {
     const s = souls[i];
     if (s.delay > 0) { s.delay--; continue; }
     s.progress += s.speed;
@@ -1169,17 +1502,29 @@ function updateSouls() {
     // Arc upward in the middle
     s.y -= Math.sin(t * Math.PI) * 40;
     s.size *= 0.995;
-    if (s.progress >= 1) souls.splice(i, 1);
+    if (s.progress >= 1) {
+      souls[i] = souls[len - 1];
+      len--;
+    }
   }
+  souls.length = len;
 }
 
 // ─── DRAWING ───
+let bgGradientDirty = true;
+let bgGradientCache = null;
+let bgLastD = -1;
 function drawBg() {
-  const grad = ctx.createLinearGradient(0, 0, 0, H);
   const d = Math.min(1, Math.abs(cameraY) / 5000);
-  grad.addColorStop(0, `rgb(${Math.round(5+d*10)},${Math.round(5+d*5)},${Math.round(Math.max(0,30-d*20))})`);
-  grad.addColorStop(1, `rgb(${Math.round(8+d*15)},${Math.round(5+d*5)},${Math.round(Math.max(0,25-d*15))})`);
-  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  const dQ = Math.round(d * 20) / 20;
+  if (bgGradientDirty || dQ !== bgLastD) {
+    bgLastD = dQ;
+    bgGradientDirty = false;
+    bgGradientCache = ctx.createLinearGradient(0, 0, 0, H);
+    bgGradientCache.addColorStop(0, `rgb(${Math.round(5+dQ*10)},${Math.round(5+dQ*5)},${Math.round(Math.max(0,30-dQ*20))})`);
+    bgGradientCache.addColorStop(1, `rgb(${Math.round(8+dQ*15)},${Math.round(5+dQ*5)},${Math.round(Math.max(0,25-dQ*15))})`);
+  }
+  ctx.fillStyle = bgGradientCache; ctx.fillRect(0, 0, W, H);
 }
 
 function drawStars() {
@@ -1494,18 +1839,15 @@ function drawBgBlackHole(ctx, x, y) {
   const r = Math.min(W, H) * 0.3;
   const t = frameCount * 0.008;
   // Outer accretion glow
-  for (let i = 5; i >= 0; i--) {
+  for (let i = 3; i >= 0; i--) {
     const gr = r * (1.2 + i * 0.25);
     ctx.fillStyle = `rgba(${200 + i * 10}, ${120 + i * 15}, ${40}, ${0.03 - i * 0.004})`;
     ctx.beginPath(); ctx.ellipse(x, y, gr * 1.6, gr * 0.4, t, 0, Math.PI * 2); ctx.fill();
   }
   // Accretion disk
-  ctx.strokeStyle = 'rgba(255,150,50,0.2)';
-  ctx.lineWidth = r * 0.12;
-  ctx.beginPath(); ctx.ellipse(x, y, r * 1.8, r * 0.4, t, 0, Math.PI * 2); ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,200,80,0.12)';
-  ctx.lineWidth = r * 0.2;
-  ctx.beginPath(); ctx.ellipse(x, y, r * 1.4, r * 0.3, t, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,170,60,0.18)';
+  ctx.lineWidth = r * 0.16;
+  ctx.beginPath(); ctx.ellipse(x, y, r * 1.6, r * 0.35, t, 0, Math.PI * 2); ctx.stroke();
   // Event horizon - pure black
   ctx.fillStyle = '#000';
   ctx.beginPath(); ctx.arc(x, y, r * 0.45, 0, Math.PI * 2); ctx.fill();
@@ -1556,8 +1898,6 @@ function drawBgNebula(ctx, x, y) {
     { ox: -0.2, oy: -0.1, rx: 1.0, ry: 0.7, col: [120, 40, 160], rot: t },
     { ox: 0.15, oy: 0.1, rx: 0.8, ry: 0.9, col: [200, 50, 80], rot: -t * 0.7 },
     { ox: -0.05, oy: 0.2, rx: 0.9, ry: 0.6, col: [40, 100, 180], rot: t * 0.5 },
-    { ox: 0.1, oy: -0.15, rx: 0.7, ry: 0.8, col: [180, 120, 40], rot: -t * 0.3 },
-    { ox: 0.0, oy: 0.0, rx: 0.5, ry: 0.5, col: [220, 180, 220], rot: t * 0.2 },
   ];
   for (const c of clouds) {
     const cx = x + c.ox * r, cy = y + c.oy * r;
@@ -1571,19 +1911,13 @@ function drawBgNebula(ctx, x, y) {
     ctx.fill();
   }
   // Bright core stars inside the nebula
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 5; i++) {
     const sx = x + Math.sin(i * 2.3 + t) * r * 0.4;
     const sy = y + Math.cos(i * 1.7 + t * 0.5) * r * 0.3;
     const brightness = 0.15 + Math.sin(frameCount * 0.04 + i) * 0.1;
-    const starR = 1.5 + Math.sin(i * 3.1) * 0.8;
+    const starR = 2.5 + Math.sin(i * 3.1) * 1.0;
     ctx.fillStyle = `rgba(255,255,255,${brightness})`;
     ctx.beginPath(); ctx.arc(sx, sy, starR, 0, Math.PI * 2); ctx.fill();
-    // Star glow
-    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, starR * 6);
-    sg.addColorStop(0, `rgba(255,220,255,${brightness * 0.4})`);
-    sg.addColorStop(1, 'rgba(255,220,255,0)');
-    ctx.fillStyle = sg;
-    ctx.beginPath(); ctx.arc(sx, sy, starR * 6, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -1619,8 +1953,8 @@ function drawBgSupernova(ctx, x, y) {
   ctx.fillStyle = `rgba(255,255,220,${0.08 * pulse})`;
   ctx.beginPath(); ctx.arc(x, y, r * 0.08, 0, Math.PI * 2); ctx.fill();
   // Ejected rays
-  for (let i = 0; i < 12; i++) {
-    const angle = (i / 12) * Math.PI * 2 + t * 0.2;
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2 + t * 0.2;
     const rayLen = r * (0.3 + Math.sin(t * 2 + i * 1.5) * 0.15);
     const rayW = r * 0.02;
     ctx.strokeStyle = `rgba(255,${180 + Math.sin(i) * 40},80,${0.06 + Math.sin(t + i) * 0.03})`;
@@ -1684,15 +2018,8 @@ function drawBgComet(ctx, x, y) {
 function drawBgWormhole(ctx, x, y) {
   const r = Math.min(W, H) * 0.25;
   const t = frameCount * 0.012;
-  // Outer distortion field
-  const distGlow = ctx.createRadialGradient(x, y, r * 0.6, x, y, r * 1.5);
-  distGlow.addColorStop(0, 'rgba(80,120,255,0.04)');
-  distGlow.addColorStop(0.5, 'rgba(60,80,200,0.02)');
-  distGlow.addColorStop(1, 'rgba(40,40,150,0)');
-  ctx.fillStyle = distGlow;
-  ctx.beginPath(); ctx.arc(x, y, r * 1.5, 0, Math.PI * 2); ctx.fill();
   // Rotating ring layers
-  for (let i = 4; i >= 0; i--) {
+  for (let i = 2; i >= 0; i--) {
     const ringR = r * (0.7 + i * 0.08);
     const tilt = 0.35 + Math.sin(t + i * 0.5) * 0.05;
     const rot = t * (1 + i * 0.3);
@@ -1712,21 +2039,8 @@ function drawBgWormhole(ctx, x, y) {
   ctx.beginPath(); ctx.arc(x, y, r * 0.5, 0, Math.PI * 2); ctx.fill();
   // Center bright point - what's on the other side?
   const pulse = 0.5 + Math.sin(t * 4) * 0.5;
-  const centerGlow = ctx.createRadialGradient(x, y, 0, x, y, r * 0.12);
-  centerGlow.addColorStop(0, `rgba(200,220,255,${0.15 * pulse})`);
-  centerGlow.addColorStop(1, 'rgba(150,180,255,0)');
-  ctx.fillStyle = centerGlow;
+  ctx.fillStyle = `rgba(200,220,255,${(0.15 * pulse).toFixed(3)})`;
   ctx.beginPath(); ctx.arc(x, y, r * 0.12, 0, Math.PI * 2); ctx.fill();
-  // Orbiting energy sparks
-  for (let i = 0; i < 6; i++) {
-    const angle = (i / 6) * Math.PI * 2 + t * 2;
-    const sparkR = r * (0.55 + Math.sin(t * 3 + i * 2) * 0.1);
-    const sx = x + Math.cos(angle) * sparkR;
-    const sy = y + Math.sin(angle) * sparkR * 0.35;
-    const sparkAlpha = 0.1 + Math.sin(t * 4 + i) * 0.06;
-    ctx.fillStyle = `rgba(180,200,255,${sparkAlpha})`;
-    ctx.beginPath(); ctx.arc(sx, sy, 2, 0, Math.PI * 2); ctx.fill();
-  }
 }
 
 // ─── PIG BACK VIEW (for intro) ───
@@ -1863,6 +2177,21 @@ function drawPig(x, y, angle) {
   ctx.translate(x, y);
   ctx.rotate(angle || 0);
   ctx.scale(PIG_DRAW_SCALE, PIG_DRAW_SCALE);
+
+  // Star rainbow aura
+  if (pig && pig.star) {
+    ctx.save(); ctx.scale(1/PIG_DRAW_SCALE, 1/PIG_DRAW_SCALE);
+    const hue = (frameCount * 8) % 360;
+    ctx.shadowColor = `hsl(${hue}, 100%, 60%)`;
+    ctx.shadowBlur = 25;
+    ctx.strokeStyle = `hsla(${hue}, 100%, 70%, 0.6)`;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(0, 0, PIG_SIZE + 15, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = `hsla(${hue}, 100%, 70%, 0.1)`;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
 
   // Shield bubble
   if (pig && pig.shield) {
@@ -2015,10 +2344,8 @@ function drawFuelOrb(f) {
   const p = 0.8 + Math.sin(frameCount * 0.06 + f.pulse) * 0.2;
   ctx.beginPath(); ctx.arc(f.x, sy, FUEL_RADIUS * 2 * p, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(68,255,170,0.06)'; ctx.fill();
-  ctx.beginPath(); ctx.arc(f.x, sy, FUEL_RADIUS * p, 0, Math.PI * 2);
-  const g = ctx.createRadialGradient(f.x-2, sy-2, 1, f.x, sy, FUEL_RADIUS*p);
-  g.addColorStop(0, '#aaffdd'); g.addColorStop(0.5, '#44ffaa'); g.addColorStop(1, '#22aa66');
-  ctx.fillStyle = g; ctx.fill();
+  const r = FUEL_RADIUS * p;
+  ctx.drawImage(fuelOrbSprite, f.x - r, sy - r, r * 2, r * 2);
   ctx.beginPath(); ctx.arc(f.x-3, sy-3, 3, 0, Math.PI*2);
   ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fill();
   ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
@@ -2031,15 +2358,7 @@ function drawAsteroid(a) {
   ctx.save();
   ctx.translate(a.x, sy);
   ctx.rotate(a.rot);
-  ctx.beginPath();
-  ctx.moveTo(a.verts[0].x, a.verts[0].y);
-  for (let i = 1; i < a.verts.length; i++) ctx.lineTo(a.verts[i].x, a.verts[i].y);
-  ctx.closePath();
-  ctx.fillStyle = '#554433'; ctx.fill();
-  ctx.strokeStyle = '#887766'; ctx.lineWidth = 2; ctx.stroke();
-  ctx.fillStyle = '#443322';
-  ctx.beginPath(); ctx.arc(a.r*0.2, -a.r*0.1, a.r*0.2, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(-a.r*0.3, a.r*0.2, a.r*0.15, 0, Math.PI*2); ctx.fill();
+  ctx.drawImage(a.sprite, -a.spriteOff, -a.spriteOff);
   ctx.restore();
 }
 
@@ -2049,10 +2368,89 @@ function drawPowerup(p) {
   const pulse = 0.85 + Math.sin(frameCount * 0.07 + p.pulse) * 0.15;
   const r = 12 * pulse;
 
+  // Star powerup: draw a real rotating star shape
+  if (p.type === 'star') {
+    const sr = 14 * pulse;
+    const ir = 6 * pulse;
+    const points = 5;
+    const rot = p.rot || 0;
+    // Glow
+    ctx.beginPath(); ctx.arc(p.x, sy, sr * 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,238,68,0.12)'; ctx.fill();
+    // Star shape
+    ctx.save();
+    ctx.translate(p.x, sy);
+    ctx.rotate(rot);
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const angle = (i * Math.PI / points) - Math.PI / 2;
+      const rad = i % 2 === 0 ? sr : ir;
+      if (i === 0) ctx.moveTo(Math.cos(angle) * rad, Math.sin(angle) * rad);
+      else ctx.lineTo(Math.cos(angle) * rad, Math.sin(angle) * rad);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#ffee44'; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    // Highlight sparkle
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.beginPath(); ctx.arc(-3, -4, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  // Heart powerup: vibrant glowing heart with sparkles
+  if (p.type === 'heart') {
+    const blink = p.heartLife < 90 ? (Math.floor(frameCount / 4) % 2 === 0) : true;
+    if (!blink) return;
+    const s = 14 * pulse;
+    // Outer glow — large and warm
+    ctx.save();
+    ctx.shadowColor = '#ff4466';
+    ctx.shadowBlur = 20;
+    ctx.beginPath(); ctx.arc(p.x, sy, s * 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,68,102,0.15)'; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    // Heart shape — bigger and more vibrant
+    ctx.save();
+    ctx.translate(p.x, sy);
+    ctx.beginPath();
+    ctx.moveTo(0, s * 0.6);
+    ctx.bezierCurveTo(-s * 0.4, s * 0.3, -s * 1.2, -s * 0.1, -s * 0.7, -s * 0.55);
+    ctx.bezierCurveTo(-s * 0.3, -s * 0.9, 0, -s * 0.7, 0, -s * 0.3);
+    ctx.bezierCurveTo(0, -s * 0.7, s * 0.3, -s * 0.9, s * 0.7, -s * 0.55);
+    ctx.bezierCurveTo(s * 1.2, -s * 0.1, s * 0.4, s * 0.3, 0, s * 0.6);
+    ctx.fillStyle = '#ff2255'; ctx.fill();
+    ctx.strokeStyle = '#ffaacc'; ctx.lineWidth = 2; ctx.stroke();
+    // Inner lighter heart
+    ctx.beginPath();
+    const is = s * 0.55;
+    ctx.moveTo(0, is * 0.6);
+    ctx.bezierCurveTo(-is * 0.4, is * 0.3, -is * 1.2, -is * 0.1, -is * 0.7, -is * 0.55);
+    ctx.bezierCurveTo(-is * 0.3, -is * 0.9, 0, -is * 0.7, 0, -is * 0.3);
+    ctx.bezierCurveTo(0, -is * 0.7, is * 0.3, -is * 0.9, is * 0.7, -is * 0.55);
+    ctx.bezierCurveTo(is * 1.2, -is * 0.1, is * 0.4, is * 0.3, 0, is * 0.6);
+    ctx.fillStyle = '#ff6688'; ctx.fill();
+    // Highlight sparkle
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.beginPath(); ctx.arc(-s * 0.28, -s * 0.35, s * 0.18, 0, Math.PI * 2); ctx.fill();
+    // Rotating sparkles around heart
+    for (let i = 0; i < 3; i++) {
+      const angle = (frameCount * 0.05 + i * Math.PI * 2 / 3);
+      const sx = Math.cos(angle) * s * 1.3;
+      const ssy = Math.sin(angle) * s * 1.3;
+      const sparkAlpha = 0.4 + Math.sin(frameCount * 0.1 + i * 2) * 0.3;
+      ctx.fillStyle = `rgba(255,200,220,${sparkAlpha})`;
+      ctx.beginPath(); ctx.arc(sx, ssy, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
+
   let color, icon, glowColor;
   if (p.type === 'superfuel') { color = '#ffd700'; icon = '★'; glowColor = 'rgba(255,215,0,0.1)'; }
   else if (p.type === 'shield') { color = '#66ccff'; icon = '◆'; glowColor = 'rgba(100,200,255,0.1)'; }
-  else { color = '#ff66ff'; icon = '◎'; glowColor = 'rgba(255,100,255,0.1)'; }
+  else if (p.type === 'magnet') { color = '#ff66ff'; icon = '◎'; glowColor = 'rgba(255,100,255,0.1)'; }
 
   ctx.beginPath(); ctx.arc(p.x, sy, r * 2.5, 0, Math.PI * 2);
   ctx.fillStyle = glowColor; ctx.fill();
@@ -2097,12 +2495,9 @@ function drawSouls() {
     if (s.delay > 0) continue;
     const alpha = 0.25 * (1 - s.progress);
     ctx.globalAlpha = alpha;
-    // Soft glow halo
-    const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.size * 3);
-    g.addColorStop(0, s.color);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(s.x, s.y, s.size * 3, 0, Math.PI * 2); ctx.fill();
+    // Soft glow halo (pre-rendered sprite, no per-frame gradient)
+    const gs = s.size * 3;
+    ctx.drawImage(soulGlowSprite, s.x - gs, s.y - gs, gs * 2, gs * 2);
     // Bright core
     ctx.fillStyle = '#fff';
     ctx.beginPath(); ctx.arc(s.x, s.y, s.size * 0.4, 0, Math.PI * 2); ctx.fill();
@@ -2138,6 +2533,32 @@ function drawHUD() {
     ctx.globalAlpha = 0.5 + Math.sin(frameCount * 0.15) * 0.5;
     ctx.fillText(`x${combo}`, 15, 68);
     ctx.globalAlpha = 1;
+  }
+
+  // Heart icon — to the right of meters text
+  if (pig.heart) {
+    ctx.save();
+    // Measure meters text width to position heart after it
+    ctx.font = 'bold 24px monospace';
+    const mw = ctx.measureText(`${meters}m`).width;
+    const hx = 15 + mw + 12, hy = 25;
+    const hs = 7;
+    ctx.translate(hx, hy);
+    ctx.beginPath();
+    ctx.moveTo(0, hs * 0.6);
+    ctx.bezierCurveTo(-hs * 0.4, hs * 0.3, -hs * 1.2, -hs * 0.1, -hs * 0.7, -hs * 0.55);
+    ctx.bezierCurveTo(-hs * 0.3, -hs * 0.9, 0, -hs * 0.7, 0, -hs * 0.3);
+    ctx.bezierCurveTo(0, -hs * 0.7, hs * 0.3, -hs * 0.9, hs * 0.7, -hs * 0.55);
+    ctx.bezierCurveTo(hs * 1.2, -hs * 0.1, hs * 0.4, hs * 0.3, 0, hs * 0.6);
+    ctx.fillStyle = '#ff2255'; ctx.fill();
+    ctx.strokeStyle = '#ffaacc'; ctx.lineWidth = 1; ctx.stroke();
+    // Pulse glow
+    const gAlpha = 0.3 + Math.sin(frameCount * 0.08) * 0.2;
+    ctx.shadowColor = '#ff4466';
+    ctx.shadowBlur = 8 * gAlpha;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
   }
 
   const maxShow = Math.min(pig.fuel, 15);
@@ -2180,6 +2601,10 @@ function drawHUD() {
   if (pig.magnet) {
     ctx.fillStyle = '#ff66ff'; ctx.font = '11px monospace'; ctx.textAlign = 'right';
     ctx.fillText(`MAGNET ${Math.ceil(pig.magnetTimer / 60)}s`, W - 15, py); py += 16;
+  }
+  if (pig.star) {
+    ctx.fillStyle = '#ffee44'; ctx.font = '11px monospace'; ctx.textAlign = 'right';
+    ctx.fillText(`STAR ${Math.ceil(pig.starTimer / 60)}s`, W - 15, py); py += 16;
   }
 
   if (pig.fuel === 0 && Math.sin(frameCount * 0.1) > 0) {
@@ -2395,7 +2820,13 @@ function gameLoop(timestamp) {
   } else if (state === 'intro') {
     drawIntro();
   } else {
-    drawBg(); drawStars(); drawScenery();
+    drawBg();
+    // Star mode: subtle blue tint overlay
+    if (pig && pig.star) {
+      ctx.fillStyle = 'rgba(40,80,180,0.12)';
+      ctx.fillRect(0, 0, W, H);
+    }
+    drawStars(); drawScenery();
     drawComboTrails();
     for (const a of asteroids) drawAsteroid(a);
     for (const f of fuels) drawFuelOrb(f);
@@ -2409,6 +2840,46 @@ function gameLoop(timestamp) {
       ctx.fillRect(0, 0, W, H);
     }
     if (pig) drawHUD();
+
+    // Heart revive animation — parachute above pig
+    if (heartReviving && pig) {
+      const pigScreenY = pig.y - cameraY;
+      const progress = 1 - heartReviveTimer / 90;
+      // Parachute fades in quickly then fades out at end
+      const alpha = progress < 0.15 ? progress / 0.15 : progress > 0.8 ? (1 - progress) / 0.2 : 1;
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.9;
+      ctx.translate(pig.x, pigScreenY - 25);
+      // Canopy — bigger, rounder
+      ctx.beginPath();
+      ctx.arc(0, 0, 24, Math.PI, 0);
+      ctx.fillStyle = '#ff4466'; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+      // Canopy stripes
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0, 0, 24, Math.PI + 0.5, -0.5); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, 24, Math.PI + 1.2, -1.2); ctx.stroke();
+      // Cords to pig
+      ctx.beginPath();
+      ctx.moveTo(-22, 0); ctx.lineTo(-6, 23);
+      ctx.moveTo(-8, -3); ctx.lineTo(-2, 23);
+      ctx.moveTo(8, -3); ctx.lineTo(2, 23);
+      ctx.moveTo(22, 0); ctx.lineTo(6, 23);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.8; ctx.stroke();
+      // Small heart on canopy
+      const hs = 5;
+      ctx.save(); ctx.translate(0, -8);
+      ctx.beginPath();
+      ctx.moveTo(0, hs * 0.6);
+      ctx.bezierCurveTo(-hs * 0.4, hs * 0.3, -hs * 1.2, -hs * 0.1, -hs * 0.7, -hs * 0.55);
+      ctx.bezierCurveTo(-hs * 0.3, -hs * 0.9, 0, -hs * 0.7, 0, -hs * 0.3);
+      ctx.bezierCurveTo(0, -hs * 0.7, hs * 0.3, -hs * 0.9, hs * 0.7, -hs * 0.55);
+      ctx.bezierCurveTo(hs * 1.2, -hs * 0.1, hs * 0.4, hs * 0.3, 0, hs * 0.6);
+      ctx.restore();
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.restore();
+    }
+
     if (state === 'gameover') drawGameOver();
   }
 
