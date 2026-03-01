@@ -32,6 +32,9 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
 let W, H;
 let S = 1;
+let bgGradientDirty = true;
+let bgGradientCache = null;
+let bgLastD = -1;
 function resizeCanvas() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const screenW = window.innerWidth;
@@ -1511,9 +1514,6 @@ function updateSouls() {
 }
 
 // ─── DRAWING ───
-let bgGradientDirty = true;
-let bgGradientCache = null;
-let bgLastD = -1;
 function drawBg() {
   const d = Math.min(1, Math.abs(cameraY) / 5000);
   const dQ = Math.round(d * 20) / 20;
